@@ -40,6 +40,8 @@ const transcriptCache = new Map();
 // Cache expiry time (2 hours)
 const CACHE_EXPIRY = 2 * 60 * 60 * 1000;
 const TEMP_SESSION_EXPIRY = 60 * 60 * 1000;
+const YTDLP_COOKIES_PATH = process.env.YTDLP_COOKIES_PATH || '';
+const YTDLP_PROXY_URL = process.env.YTDLP_PROXY_URL || '';
 
 // ══════════════════════════════════════════════════════════════
 // Helper: Build enriched PATH for child processes
@@ -128,6 +130,66 @@ function runCommand(cmd) {
   });
 }
 
+function shellEscape(v) {
+  return String(v || '').replace(/"/g, '\\"');
+}
+
+function getYtDlpBaseArgs() {
+  const args = ['--no-playlist'];
+  if (YTDLP_COOKIES_PATH) args.push(`--cookies "${escapePath(YTDLP_COOKIES_PATH)}"`);
+  if (YTDLP_PROXY_URL) args.push(`--proxy "${shellEscape(YTDLP_PROXY_URL)}"`);
+  return args.join(' ');
+}
+
+function ytDlpCommand(args) {
+  return `yt-dlp ${getYtDlpBaseArgs()} ${args}`.replace(/\s+/g, ' ').trim();
+}
+
+function parseYtDlpError(err) {
+  const message = (err && err.message ? err.message : String(err || '')).toLowerCase();
+  if (
+    message.includes('http error 429') ||
+    message.includes('too many requests') ||
+    message.includes("sign in to confirm you're not a bot") ||
+    message.includes('sign in to confirm you’re not a bot')
+  ) {
+    return 'YouTube blocked this server request (429/bot check). Add cookies or proxy on server and try again.';
+  }
+  if (message.includes('yt-dlp not found') || message.includes('is not recognized')) {
+    return 'yt-dlp is not available on server runtime.';
+  }
+  if (message.includes('unsupported url') || message.includes('invalid url')) {
+    return 'Invalid or unsupported video URL.';
+  }
+  return err && err.message ? err.message : 'yt-dlp command failed';
+}
+
+async function runYtDlp(args) {
+  try {
+    return await runCommand(ytDlpCommand(args));
+  } catch (err) {
+    throw new Error(parseYtDlpError(err));
+  }
+}
+
+async function fetchVideoInfoFromYtDlp(url) {
+  const safeUrl = shellEscape(url);
+  const attemptArgs = [
+    `--dump-json --no-download --extractor-args "youtube:player_client=android,web,ios" --retries 3 --socket-timeout 20 "${safeUrl}"`,
+    `--dump-json --no-download --retries 3 --socket-timeout 20 "${safeUrl}"`
+  ];
+  let lastErr = null;
+  for (const args of attemptArgs) {
+    try {
+      const out = await runYtDlp(args);
+      return JSON.parse(out);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('Unable to fetch video info');
+}
+
 function escapePath(p) {
   return p.replace(/\\/g, '/');
 }
@@ -190,9 +252,7 @@ app.get('/api/video-info', async (req, res) => {
     }
 
     const videoId = extractVideoId(url);
-    const cmd = `yt-dlp --dump-json --no-download "${url}"`;
-    const output = await runCommand(cmd);
-    const info = JSON.parse(output);
+    const info = await fetchVideoInfoFromYtDlp(url);
 
     // Check if we have this video cached
     const cached = videoCache.get(videoId);
@@ -210,7 +270,7 @@ app.get('/api/video-info', async (req, res) => {
     });
   } catch (err) {
     console.error('Error fetching video info:', err.message);
-    res.status(500).json({ error: 'Failed to fetch video info. Make sure yt-dlp is installed and the URL is valid.' });
+    res.status(500).json({ error: err.message || 'Failed to fetch video info' });
   }
 });
 
@@ -249,10 +309,10 @@ app.get('/api/transcript', async (req, res) => {
     }
 
     // First, get available subtitles info
-    const listCmd = `yt-dlp --list-subs --skip-download "${url}"`;
+    const listCmdArgs = `--list-subs --skip-download --extractor-args "youtube:player_client=android,web,ios" "${shellEscape(url)}"`;
     let availableLanguages = ['original'];
     try {
-      const listOutput = await runCommand(listCmd);
+      const listOutput = await runYtDlp(listCmdArgs);
       // Parse available languages
       if (listOutput.includes('en') || listOutput.includes('English')) availableLanguages.push('en');
       if (listOutput.includes('hi') || listOutput.includes('Hindi')) availableLanguages.push('hi');
@@ -272,10 +332,10 @@ app.get('/api/transcript', async (req, res) => {
     const outputTemplate = escapePath(path.join(transcriptDir, `transcript_${targetLang}`));
     
     // Download subtitles
-    const cmd = `yt-dlp --skip-download --write-subs --write-auto-subs --sub-langs "${subLangs}" --sub-format "vtt/srt/best" -o "${outputTemplate}" "${url}"`;
+    const cmdArgs = `--skip-download --write-subs --write-auto-subs --extractor-args "youtube:player_client=android,web,ios" --retries 3 --sub-langs "${subLangs}" --sub-format "vtt/srt/best" -o "${outputTemplate}" "${shellEscape(url)}"`;
     
     try {
-      await runCommand(cmd);
+      await runYtDlp(cmdArgs);
     } catch (e) {
       // Subtitles might not be available
     }
@@ -322,7 +382,7 @@ app.get('/api/transcript', async (req, res) => {
     });
   } catch (err) {
     console.error('Error fetching transcript:', err.message);
-    res.status(500).json({ error: 'Failed to fetch transcript' });
+    res.status(500).json({ error: err.message || 'Failed to fetch transcript' });
   }
 });
 
@@ -399,9 +459,7 @@ app.post('/api/extract-frames', async (req, res) => {
     sessions.set(sessionId, { status: 'initializing', progress: 0 });
 
     // ── Step 1: Get video info ──
-    const infoCmd = `yt-dlp --dump-json --no-download "${url}"`;
-    const infoOutput = await runCommand(infoCmd);
-    const videoInfo = JSON.parse(infoOutput);
+    const videoInfo = await fetchVideoInfoFromYtDlp(url);
     const videoDuration = videoInfo.duration || 0;
 
     const start = parseTime(startTime) || 0;
@@ -427,9 +485,9 @@ app.post('/api/extract-frames', async (req, res) => {
       sessions.set(sessionId, { status: 'downloading', progress: 10 });
       
       const cacheVideoPath = path.join(CACHE_DIR, `${videoId}.mp4`);
-      const downloadCmd = `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best" --merge-output-format mp4 -o "${escapePath(cacheVideoPath)}" "${url}"`;
+      const downloadCmdArgs = `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best" --extractor-args "youtube:player_client=android,web,ios" --retries 3 --fragment-retries 3 --merge-output-format mp4 -o "${escapePath(cacheVideoPath)}" "${shellEscape(url)}"`;
       
-      await runCommand(downloadCmd);
+      await runYtDlp(downloadCmdArgs);
 
       // Verify download
       if (!fs.existsSync(cacheVideoPath)) {
@@ -679,6 +737,15 @@ app.get('/api/download-all/:sessionId', (req, res) => {
 
 app.delete('/api/cleanup/:sessionId', (req, res) => {
   cleanupSession(req.params.sessionId);
+  res.json({ message: 'Cleaned up' });
+});
+
+app.post('/api/cleanup', (req, res) => {
+  const { sessionId } = req.body || {};
+  if (!sessionId) {
+    return res.status(400).json({ error: 'sessionId is required' });
+  }
+  cleanupSession(sessionId);
   res.json({ message: 'Cleaned up' });
 });
 

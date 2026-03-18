@@ -164,6 +164,28 @@
     } catch (e) {}
   }
 
+  function cleanupSession(sessionId, fireAndForget) {
+    if (!sessionId) return Promise.resolve();
+    var request = fetch('/api/cleanup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: sessionId }),
+      keepalive: !!fireAndForget
+    }).catch(function() {});
+    return request;
+  }
+
+  function resetExtractionState() {
+    resultsSection.classList.add('hidden');
+    transcriptSection.classList.add('hidden');
+    currentFrames = [];
+    currentSessionId = null;
+    framesGrid.innerHTML = '';
+    numFramesInput.value = 10;
+    clearState();
+    updateHint();
+  }
+
   function renderFrames() {
     frameCountBadge.textContent = currentFrames.length;
     framesGrid.innerHTML = '';
@@ -493,6 +515,7 @@
       endTime: endTime,
       mode: currentMode
     };
+    var previousSessionId = currentSessionId;
 
     if (currentMode === 'numFrames') {
       body.numFrames = parseInt(numFramesInput.value) || 10;
@@ -505,6 +528,10 @@
     resultsSection.classList.add('hidden');
     progressTitle.textContent = 'Processing...';
     progressDesc.textContent = currentVideoData.isCached ? 'Using cached video' : 'Downloading video';
+
+    if (previousSessionId) {
+      cleanupSession(previousSessionId, true);
+    }
 
     fetch('/api/extract-frames', {
       method: 'POST',
@@ -573,14 +600,8 @@
 
   // New extraction
   newExtractionBtn.addEventListener('click', function() {
-    resultsSection.classList.add('hidden');
-    transcriptSection.classList.add('hidden');
-    currentFrames = [];
-    currentSessionId = null;
-    framesGrid.innerHTML = '';
-    numFramesInput.value = 10;
-    clearState();
-    updateHint();
+    cleanupSession(currentSessionId, true);
+    resetExtractionState();
   });
 
   // Lightbox
@@ -632,6 +653,11 @@
   // Enter key on URL input
   urlInput.addEventListener('keypress', function(e) {
     if (e.key === 'Enter') fetchBtn.click();
+  });
+
+  window.addEventListener('beforeunload', function() {
+    cleanupSession(currentSessionId, true);
+    clearState();
   });
 
   // Initialize
