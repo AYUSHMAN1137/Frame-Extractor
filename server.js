@@ -48,6 +48,8 @@ const TEMP_SESSION_EXPIRY = 60 * 60 * 1000;
 function getEnrichedEnv() {
   const extraPaths = [];
   const home = process.env.USERPROFILE || process.env.HOME || '';
+  const isWindows = process.platform === 'win32';
+  const pathDelimiter = path.delimiter;
 
   const pythonScriptsDirs = [
     path.join(home, 'AppData', 'Local', 'Programs', 'Python', 'Python312', 'Scripts'),
@@ -91,14 +93,20 @@ function getEnrichedEnv() {
     if (fs.existsSync(dir)) extraPaths.push(dir);
   }
 
-  let systemPath = '';
-  try {
-    systemPath = execSync('powershell -Command "[System.Environment]::GetEnvironmentVariable(\'Path\',\'Machine\') + \';\' + [System.Environment]::GetEnvironmentVariable(\'Path\',\'User\')"', { encoding: 'utf8' }).trim();
-  } catch (e) {
-    systemPath = process.env.PATH || '';
+  let systemPath = process.env.PATH || '';
+  if (isWindows) {
+    try {
+      systemPath = execSync('powershell -Command "[System.Environment]::GetEnvironmentVariable(\'Path\',\'Machine\') + \';\' + [System.Environment]::GetEnvironmentVariable(\'Path\',\'User\')"', { encoding: 'utf8' }).trim();
+    } catch (e) {
+      systemPath = process.env.PATH || '';
+    }
   }
 
-  const finalPath = [...extraPaths, systemPath, process.env.PATH].filter(Boolean).join(';');
+  if (!isWindows) {
+    extraPaths.push('/usr/local/bin', '/usr/bin', '/bin');
+  }
+
+  const finalPath = [...extraPaths, systemPath, process.env.PATH].filter(Boolean).join(pathDelimiter);
   return { ...process.env, PATH: finalPath };
 }
 
@@ -164,13 +172,6 @@ function extractVideoId(url) {
 function isCacheValid(timestamp) {
   return (Date.now() - timestamp) < CACHE_EXPIRY;
 }
-
-app.get('/health', (req, res) => {
-  res.status(200).json({
-    ok: true,
-    timestamp: Date.now()
-  });
-});
 
 // ══════════════════════════════════════════════════════════════
 // GET /api/video-info
