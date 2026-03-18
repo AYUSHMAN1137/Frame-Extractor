@@ -165,6 +165,13 @@ function isCacheValid(timestamp) {
   return (Date.now() - timestamp) < CACHE_EXPIRY;
 }
 
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    ok: true,
+    timestamp: Date.now()
+  });
+});
+
 // ══════════════════════════════════════════════════════════════
 // GET /api/video-info
 // ══════════════════════════════════════════════════════════════
