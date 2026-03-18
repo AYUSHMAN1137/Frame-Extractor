@@ -175,7 +175,9 @@ async function runYtDlp(args) {
 async function fetchVideoInfoFromYtDlp(url) {
   const safeUrl = shellEscape(url);
   const attemptArgs = [
-    `--dump-json --no-download --extractor-args "youtube:player_client=android,web,ios" --retries 3 --socket-timeout 20 "${safeUrl}"`,
+    `--dump-json --no-download --extractor-args "youtube:player_client=tv,web,ios" --retries 3 --socket-timeout 20 "${safeUrl}"`,
+    `--force-ipv6 --dump-json --no-download --extractor-args "youtube:player_client=tv,web,ios" --retries 3 --socket-timeout 20 "${safeUrl}"`,
+    `--force-ipv4 --dump-json --no-download --extractor-args "youtube:player_client=tv,web,ios" --retries 3 --socket-timeout 20 "${safeUrl}"`,
     `--dump-json --no-download --retries 3 --socket-timeout 20 "${safeUrl}"`
   ];
   let lastErr = null;
@@ -309,7 +311,7 @@ app.get('/api/transcript', async (req, res) => {
     }
 
     // First, get available subtitles info
-    const listCmdArgs = `--list-subs --skip-download --extractor-args "youtube:player_client=android,web,ios" "${shellEscape(url)}"`;
+    const listCmdArgs = `--list-subs --skip-download --extractor-args "youtube:player_client=tv,web,ios" "${shellEscape(url)}"`;
     let availableLanguages = ['original'];
     try {
       const listOutput = await runYtDlp(listCmdArgs);
@@ -332,7 +334,7 @@ app.get('/api/transcript', async (req, res) => {
     const outputTemplate = escapePath(path.join(transcriptDir, `transcript_${targetLang}`));
     
     // Download subtitles
-    const cmdArgs = `--skip-download --write-subs --write-auto-subs --extractor-args "youtube:player_client=android,web,ios" --retries 3 --sub-langs "${subLangs}" --sub-format "vtt/srt/best" -o "${outputTemplate}" "${shellEscape(url)}"`;
+    const cmdArgs = `--skip-download --write-subs --write-auto-subs --extractor-args "youtube:player_client=tv,web,ios" --retries 3 --sub-langs "${subLangs}" --sub-format "vtt/srt/best" -o "${outputTemplate}" "${shellEscape(url)}"`;
     
     try {
       await runYtDlp(cmdArgs);
@@ -485,9 +487,29 @@ app.post('/api/extract-frames', async (req, res) => {
       sessions.set(sessionId, { status: 'downloading', progress: 10 });
       
       const cacheVideoPath = path.join(CACHE_DIR, `${videoId}.mp4`);
-      const downloadCmdArgs = `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best" --extractor-args "youtube:player_client=android,web,ios" --retries 3 --fragment-retries 3 --merge-output-format mp4 -o "${escapePath(cacheVideoPath)}" "${shellEscape(url)}"`;
+      const baseDownloadArgs = `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best" --retries 3 --fragment-retries 3 --merge-output-format mp4 -o "${escapePath(cacheVideoPath)}" "${shellEscape(url)}"`;
+      const downloadAttemptArgs = [
+        `--extractor-args "youtube:player_client=tv,web,ios" ${baseDownloadArgs}`,
+        `--force-ipv6 --extractor-args "youtube:player_client=tv,web,ios" ${baseDownloadArgs}`,
+        `--force-ipv4 --extractor-args "youtube:player_client=tv,web,ios" ${baseDownloadArgs}`,
+        `${baseDownloadArgs}`
+      ];
       
-      await runYtDlp(downloadCmdArgs);
+      let downloadSuccess = false;
+      let lastDownloadErr = null;
+      for (const args of downloadAttemptArgs) {
+        try {
+          await runYtDlp(args);
+          downloadSuccess = true;
+          break;
+        } catch (err) {
+          lastDownloadErr = err;
+        }
+      }
+      
+      if (!downloadSuccess) {
+        throw lastDownloadErr;
+      }
 
       // Verify download
       if (!fs.existsSync(cacheVideoPath)) {
